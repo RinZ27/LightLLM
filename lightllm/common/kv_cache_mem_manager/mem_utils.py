@@ -33,7 +33,15 @@ def select_mem_manager_class():
     elif get_env_start_args().llm_kv_type == "int4kv":
         memory_manager_class = PPLINT4KVMemoryManager
     elif get_env_start_args().llm_kv_type == "fp8kv":
+        assert get_env_start_args().kv_quant_calibration_config_path is not None, (
+            "fp8kv mode requires --kv_quant_calibration_config_path to load pre-computed FP8 scales. "
+            "If you want to export calibration data, use --llm_kv_type exportFp8kv instead."
+        )
+        memory_manager_class = CalibrationFP8KVMemoryManager
+        logger.info("Model kv cache using mode offline calibration fp8kv (inference with pre-computed scales)")
+    elif get_env_start_args().llm_kv_type == "exportFp8kv":
         memory_manager_class = ExportCalibrationMemoryManager
+        logger.info("Model kv cache using mode export fp8kv calibration (collecting and exporting scales)")
     elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
 

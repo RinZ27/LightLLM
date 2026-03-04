@@ -123,6 +123,31 @@ def normal_or_p_d_start(args):
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
 
+    # FP8 KV cache mode checks
+    if args.llm_kv_type in ("fp8kv", "exportFp8kv"):
+        # fp8kv / exportFp8kv require fa3 or flashinfer attention backend
+        prefill_backends = args.llm_prefill_att_backend
+        decode_backends = args.llm_decode_att_backend
+        has_fa3_or_flashinfer = any(
+            b in ("fa3", "flashinfer") for b in prefill_backends
+        ) and any(
+            b in ("fa3", "flashinfer") for b in decode_backends
+        )
+        assert has_fa3_or_flashinfer, (
+            f"{args.llm_kv_type} mode requires fa3 or flashinfer attention backend, "
+            "add --llm_prefill_att_backend fa3 --llm_decode_att_backend fa3 or "
+            "--llm_prefill_att_backend flashinfer --llm_decode_att_backend flashinfer"
+        )
+    if args.llm_kv_type == "fp8kv":
+        assert args.kv_quant_calibration_config_path is not None, (
+            "fp8kv inference mode requires --kv_quant_calibration_config_path. "
+            "If you want to export calibration data, use --llm_kv_type exportFp8kv instead."
+        )
+    if args.llm_kv_type == "exportFp8kv":
+        assert args.disable_cudagraph is True, (
+            "exportFp8kv mode needs --disable_cudagraph"
+        )
+
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0

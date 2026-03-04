@@ -346,10 +346,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv"],
+        choices=["None", "int8kv", "int4kv", "fp8kv", "exportFp8kv"],
         default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json.
-                fp8kv: not fully supported yet, will support in future""",
+                fp8kv: use float8_e4m3fn to store kv cache for inference, need fa3 or flashinfer backend.
+                Requires --kv_quant_calibration_config_path to load pre-computed FP8 scales.
+                exportFp8kv: export calibration mode, collect kv statistics and export kv_cache_calib.json.
+                Need fa3 or flashinfer backend and --disable_cudagraph.""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
