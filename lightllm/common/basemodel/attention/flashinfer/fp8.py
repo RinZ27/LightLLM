@@ -20,11 +20,23 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
 
 @dataclasses.dataclass
 class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
-    offline_scales: torch.Tensor = None
+    k_descale: torch.Tensor = None
+    v_descale: torch.Tensor = None
 
     def init_state(self):
         super().init_state()
-        self.offline_scales = self.infer_state.mem_manager.scales_list
+        mem_manager = self.backend.model.mem_manager
+        offline_scales: torch.Tensor = mem_manager.scales
+        head_num = mem_manager.head_num
+
+        if offline_scales is not None:
+            # scales shape: [layer_num, 2 * head_num]
+            # k_descale: [layer_num, head_num], v_descale: [layer_num, head_num]
+            self.k_descale = offline_scales[:, :head_num]
+            self.v_descale = offline_scales[:, head_num:]
+        else:
+            self.k_descale = None
+            self.v_descale = None
 
     def prefill_att(
         self,
@@ -53,14 +65,14 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
-        offline_scales = self.offline_scales
-        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
+        # per-head scales: [head_num] for current layer
+        k_scale = self.k_descale[layer_index] if self.k_descale is not None else None
+        v_scale = self.v_descale[layer_index] if self.v_descale is not None else None
         self.prefill_wrapper.run(
             q,
             (k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
+            k_scale=k_scale,
+            v_scale=v_scale,
             out=o_tensor,
         )
         return o_tensor
@@ -68,11 +80,21 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
 
 @dataclasses.dataclass
 class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
-    offline_scales: torch.Tensor = None
+    k_descale: torch.Tensor = None
+    v_descale: torch.Tensor = None
 
     def init_state(self):
         super().init_state()
-        self.offline_scales = self.infer_state.mem_manager.scales_list
+        mem_manager = self.backend.model.mem_manager
+        offline_scales: torch.Tensor = mem_manager.scales
+        head_num = mem_manager.head_num
+
+        if offline_scales is not None:
+            self.k_descale = offline_scales[:, :head_num]
+            self.v_descale = offline_scales[:, head_num:]
+        else:
+            self.k_descale = None
+            self.v_descale = None
 
     def copy_for_decode_cuda_graph(self, new_state):
         return super().copy_for_decode_cuda_graph(new_state)
@@ -105,19 +127,18 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
-
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        offline_scales = self.offline_scales
         layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
-
-        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
+        # per-head scales: [head_num] for current layer
+        k_scale = self.k_descale[layer_index] if self.k_descale is not None else None
+        v_scale = self.v_descale[layer_index] if self.v_descale is not None else None
         self.decode_wrapper.run(
             q,
             (k, v),
-            k_scale=k_descale,
-            v_scale=v_descale,
+            k_scale=k_scale,
+            v_scale=v_scale,
             out=o_tensor,
         )
         return o_tensor
+

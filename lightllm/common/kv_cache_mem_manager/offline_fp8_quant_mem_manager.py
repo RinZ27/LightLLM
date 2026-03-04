@@ -31,10 +31,10 @@ class OfflineFP8QuantMemManager(MemoryManager):
         self.scales_list = None
         self.abs_max = None
 
-        enable_fa3 = "fa3" in get_env_start_args().llm_prefill_att_backend
+        enable_per_head = self._is_per_head_quant()
 
         if is_export_mode:
-            scales_shape = [layer_num, 2 * head_num] if enable_fa3 else [layer_num, 2]
+            scales_shape = [layer_num, 2 * head_num] if enable_per_head else [layer_num, 2]
             self.abs_max = torch.zeros(scales_shape, dtype=torch.float32, device="cuda")
         elif get_env_start_args().kv_quant_calibration_config_path is not None:
             logger.info(
@@ -45,7 +45,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
 
             self.scales_list = cfg["scales"]
             self.scales = torch.tensor(self.scales_list, dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
-            if not enable_fa3:
+            if not enable_per_head:
                 self.scales = torch.repeat_interleave(self.scales, head_num, dim=-1)
             elif cfg["num_head"] > self.total_head_num:
                 factor = cfg["num_head"] // self.total_head_num
@@ -53,7 +53,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
             elif cfg["num_head"] < self.total_head_num:
                 factor = self.total_head_num // cfg["num_head"]
                 self.scales = torch.repeat_interleave(self.scales, factor, dim=-1).contiguous()
-            if enable_fa3 and dist.is_initialized() and dist.get_world_size() > 1:
+            if enable_per_head and dist.is_initialized() and dist.get_world_size() > 1:
                 half_head = self.total_head_num // 2
                 start_head = dist.get_rank() * head_num
                 end_head = start_head + head_num
@@ -66,8 +66,14 @@ class OfflineFP8QuantMemManager(MemoryManager):
         else:
             logger.warning("scales is None, no kv_quant_calibration_config_path be set, will use 1.0 as scales")
 
+    @staticmethod
+    def _is_per_head_quant():
+        """Both fa3 and flashinfer backends support per-head FP8 KV quantization."""
+        args = get_env_start_args()
+        return "fa3" in args.llm_prefill_att_backend or "flashinfer" in args.llm_prefill_att_backend
+
     def _load_and_check_config(self):
-        enable_fa3 = "fa3" in get_env_start_args().llm_prefill_att_backend
+        enable_per_head = self._is_per_head_quant()
 
         if os.path.exists(get_env_start_args().kv_quant_calibration_config_path):
             with open(get_env_start_args().kv_quant_calibration_config_path, "r") as f:
@@ -90,12 +96,14 @@ class OfflineFP8QuantMemManager(MemoryManager):
                 raise ValueError(
                     f"num_head {cfg['num_head']} in config " f"not match current model head num {self.total_head_num}"
                 )
-            if enable_fa3:
+            if enable_per_head:
                 if cfg["quant_type"] != "per_head":
-                    raise ValueError(f"quant type {cfg['num_head']} in config not match fa3 backend")
+                    raise ValueError(
+                        f"quant type {cfg['quant_type']} in config not match per-head backend (fa3/flashinfer)"
+                    )
             else:
                 if cfg["quant_type"] != "per_tensor":
-                    raise ValueError(f"quant type {cfg['quant_type']} in config not match flashinfer backend")
+                    raise ValueError(f"quant type {cfg['quant_type']} in config not match per-tensor backend")
 
             return cfg
         else:
@@ -104,7 +112,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
             )
 
     def update_calibration_data(self, kv_buffer: torch.Tensor, layer_index: int):
-        enable_fa3 = "fa3" in get_env_start_args().llm_prefill_att_backend
+        enable_per_head = self._is_per_head_quant()
         inference_counts = get_kv_quant_calibration_inference_count()
         warmup_counts = get_kv_quant_calibration_warmup_count()
         if not get_model_init_status() or self.count >= warmup_counts + inference_counts:
@@ -114,7 +122,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
             logger.info("kv cache calibration mode will collect kv cache data for quantization calibration")
 
         if self.abs_max is not None and self.count >= warmup_counts:
-            if enable_fa3:
+            if enable_per_head:
                 kv_max = kv_buffer.abs().amax(dim=(0, 2)).to(torch.float32)
             else:
                 k_max = kv_buffer[:, : self.head_num, :].abs().amax(dim=()).to(torch.float32)
@@ -124,7 +132,7 @@ class OfflineFP8QuantMemManager(MemoryManager):
             if self.count == warmup_counts + inference_counts - 1 and layer_index == self.layer_num - 1:
                 final_abs_max = self.abs_max
                 if dist.is_initialized() and dist.get_world_size() > 1:
-                    if enable_fa3:
+                    if enable_per_head:
                         k_max, v_max = torch.chunk(self.abs_max, 2, dim=-1)
                         k_max = k_max.contiguous()
                         v_max = v_max.contiguous()
@@ -149,13 +157,13 @@ class OfflineFP8QuantMemManager(MemoryManager):
             self.count += 1
 
     def _export_calibration_data(self):
-        enable_fa3 = "fa3" in get_env_start_args().llm_prefill_att_backend
+        enable_per_head = self._is_per_head_quant()
 
         model_arch = get_model_architectures(get_env_start_args().model_dir)
         cfg = {
             "version": "1.0",
             "architectures": model_arch,
-            "quant_type": "per_head" if enable_fa3 else "per_tensor",
+            "quant_type": "per_head" if enable_per_head else "per_tensor",
             "qmin": self.qmin,
             "qmax": self.qmax,
             "num_layers": self.layer_num,
